@@ -1,0 +1,494 @@
+---
+title: "MA 578 Final Report"
+author: "William Dean"
+output: pdf_document
+---
+
+``` {r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(dtw)
+```
+
+# Overview
+
+For this report, I want to perform both a Bayes OLS and Bayes GLS for a time series data set and see how the results compare. Namely, I want to see how the coefficients compare for the regressions. Will it be clear that correlation between errors is an issue? Also, how do the posterior predictions compare between the two models?
+
+# Data
+
+The data I wanted to use is box office data from a movie theater which was found in [*A Modern Approach to Regression with R*](http://www.stat.tamu.edu/~sheather/book/) by Simon J. Sheather. This data recorded the year, ranging from 1976 until 2007. For each year, there is a recording for the gross box office sales in thousands. Standardizing the year variable to start at zero, we see the following relationship between year and gross box office sales:
+
+```{r, include = FALSE}
+df <- read.table("boxoffice.txt", header = TRUE)
+df$year <- df$year - min(df$year)
+X <- matrix(c(rep(1, nrow(df)), df$year), ncol = 2)
+y <- df$GrossBoxOffice
+```
+
+```{r, echo = FALSE}
+plot(X[, 2], y, type = "l", main = "Gross Box Office Sales", 
+     xlab = "Years since 1976", ylab = "Gross Box Office Sales")
+```
+
+Considering the relationship between each year's sales, it is clear that this data is heavily correlated. That is, a year's gross box office sales will be related to how well the sales were in the previous year. Below is the autocorrelation for the box office sales. 
+
+```{r, echo= FALSE}
+acf(y, main = "")
+```
+
+# The Two Regression Models
+
+I will implement two different Bayesian models on this data: A Bayes Linear regression and an AR(1) Model. My prior information for both will be the same for the $\beta$ vector as well as the variation, $\sigma^2$. I will use a non-informative prior for $\beta$ and will center the multivariate normal distribution around $\mathbf{0}$ and will have a conservative covariance matrix for the normal distribution. Both models will have a prior $\sigma^2$ centered around the OLS estimator. The AR(1) will have a correlation parameter $\phi$ which I will initialize from the acf.
+
+In order to sample from the posterior distribution $p(\mathbf{\beta}, \sigma^2 | X, y)$ of the OLS, I use a Gibbs sampler for both parameters. Sampling the posterior $p(\mathbf{\beta}, \sigma^2 , \phi| X, y)$ of the GLS was a little more involved since the parameter $\phi$ does not have a standard full conditional. To get around this, I use a Gibb's sampler for $\beta$ and $\sigma^2$ and the Metropolis Hastings algorithm for $\phi$. For this implementation, I referenced chapters 9 and 10 from Peter Hoff's [*A First Course in Bayesian Statistical Methods*](http://www.springer.com/us/book/9780387922997). See the appendix for code.
+
+
+```{r, sample OLS, echo = FALSE}
+S <- 10000
+# Prior Information
+fit <- lm(y ~ X - 1); summ <- summary(fit)
+B0 <- c(0, 0)
+S0 <- nrow(X) * summ$sigma^2 *solve(t(X) %*% X); iS0 <- solve(S0)
+nu0 <- 1; s20 <- summ$sigma^2
+
+rBeta <- function(sigma2) {
+  Sn = solve(iS0 + t(X) %*% X / sigma2)
+  Bn = Sn %*% ( iS0 %*% B0 + t(X) %*% y / sigma2 )
+  return( rmvnorm(1, Bn, Sn))
+}
+rsigma2 <- function(Beta) {
+  yXB = y - X %*% Beta
+  SSR = t(yXB) %*%  yXB
+  return( 1 / rgamma(1, (nu0 + n) / 2, (nu0 * s20 + SSR) / 2))
+}
+
+# Prior
+n <- nrow(X); p <- ncol(X)
+beta <- c(0, 0); s2 <- c(s20)
+for (s in 1:S) {
+  # Sample Beta
+  beta <- rbind(beta, rBeta(s2[length(s2)]))
+  # Sample Sigma2
+  s2 <- c(s2, rsigma2(beta[nrow(beta), ]))
+}
+```
+
+```{r, Sample GLS, echo = FALSE}
+# Create Covariance matrix
+covmat <- function(phi) {
+  x = 1:nrow(X)
+  phi ^ abs(outer(x, x, "-"))
+}
+# Sample Full Conditional B
+rBeta <- function(icovmat, sigma2) {
+  Sn = solve((t(X) %*% icovmat %*% X) / sigma2 + iS0)
+  Bn = Sn %*% ( (t(X) %*% icovmat %*% y) / sigma2 + iS0 %*% B0 )
+  return(rmvnorm(1, Bn, Sn))
+}
+# Sample Full Conditional Sigma2
+rsigma2 <- function(icovmat, Beta) {
+  yXB = y - (X %*% Beta)
+  SSRp = t(yXB) %*% icovmat %*% yXB
+  return( 1 / rgamma(1, (nu0 + n) / 2, (nu0 * s20 + SSRp) / 2))
+}
+# Metro Hastings phi
+rphi <- function(phi, Beta, sigma2) {
+  phi.star = runif(1, phi - delta, phi + delta)
+  phi.star = ifelse(phi.star < 0, abs(phi.star), 
+                    ifelse(phi.star > 1, 2 - phi.star, phi.star))
+  log.r = dmvnorm(y, X %*% Beta, sigma = sigma2 * covmat(phi.star), log = TRUE) - 
+    dmvnorm(y, X %*% Beta, sigma = sigma2 * covmat(phi), log = TRUE)
+  
+  if (log(runif(1)) < log.r) { 
+    return( phi.star )
+  } else {
+    return( phi )
+  }
+}
+
+# Metropolis Hastings
+S <- 10000
+# Prior Information
+iS0 <- solve(S0)
+delta <- .01
+BETA <- c(0, 0); SIGMA2 <- c(s20); PHI <- c(.923)
+for (s in 1:S) {
+  # Sample Beta
+  phi <- PHI[length(PHI)]
+  ico <- (covmat(phi))
+  BETA <- rbind(BETA, rBeta(ico, SIGMA2[length(SIGMA2)]))
+  # Sample Sigma2
+  SIGMA2 <- c(SIGMA2, rsigma2(ico, BETA[nrow(BETA), ]))
+  # Update Phi
+  PHI <- c(PHI, rphi(phi, BETA[nrow(BETA), ], SIGMA2[length(SIGMA2)]))
+}
+```
+
+# Results
+
+After running the samplers, we have samples from the posterior distributions for both the OLS and GLS models. The mean parameters from the OLS model are: 
+
+```{r, echo = FALSE}
+cat("Intercept:", mean(beta[, 1]), "\n")
+cat("Slope:", mean(beta[, 2]), "\n")
+cat("Sigma:", sqrt(mean(s2)))
+```
+
+For the GLS model, they are:
+
+```{r, echo = FALSE}
+cat("Intercept:", mean(BETA[, 1]), "\n")
+cat("Slope:", mean(BETA[, 2]), "\n")
+cat("Sigma:", sqrt(mean(SIGMA2)), "\n")
+cat("Phi:", mean(PHI))
+```
+
+There are some differences between the parameters at first glances, but let's explore them a little more individually as well as the differences between the models.
+
+## Coefficients
+
+Considering the joint distribution for both the $\beta$ from the OLS and GLS below. The estimates appear to be fairly similar shaped and centered around similar values, however there is a lot more variation in the OLS parameters.
+
+```{r, echo = FALSE}
+plot(beta[-1, ], col = "blue",
+     main = "Comparison of OLS and GLS Parameters",
+     xlab = "Intercept", ylab = "Slope")
+points(BETA[-1, ], col = "red")
+legend("topright", text.col = c("blue", "red"),
+       legend = c("OLS", "GLS"))
+```
+
+Below around the bands for all the slope and intercept lines from the OLS and GLS models. As we saw above, the GLS model has a lot less variation in comparison to the OLS model. Both appear to capture the trend of the data well and go through the observed data. 
+
+```{r, echo = FALSE}
+plot(y, main = "Bands for Regressions", 
+     xlab = "Years since 1976", 
+     ylab = "Gross Box Office Sales")
+for (i in 2:nrow(beta)) abline(beta[i, ], col = "blue")
+for (i in 2:nrow(BETA)) abline(BETA[i, ], col = "red")
+points(1:length(y), y, cex = 1, type = "p", pch = 16)
+legend("topleft", text.col = c("blue", "red"),
+       legend = c("OLS", "GLS"))
+```
+
+
+```{r, echo = FALSE}
+plot(y, main = "Mean Function for Regressions", 
+     xlab = "Years since 1976", 
+     ylab = "Gross Box Office Sales")
+abline(apply(BETA, 2, mean), col = "red")
+abline(apply(beta, 2, mean), col = "blue")
+legend("topleft", text.col = c("blue", "red"),
+       legend = c("OLS", "GLS"))
+```
+
+
+## Posterior Predictive Checks
+
+The parameters for the slope and intercept appear to catch the general trends for the data, but let's consider prediction from each of the models. Below we see posterior predictions 4 of the predictions for both models. The blue lines is from the OLS where the errors are independent. In comparison, the red lines are 4 predictions for the GLS model. There may be more variation around the regression line for the GLS model which can be seen in the Appendix, but the predicted data appears to capture the the relationship in the data better than the OLS model. It is clear that the GLS predictions depend upon prior previous predictions just like the observed data.
+
+```{r, echo = FALSE}
+# Sample from the OLS
+sample.ols <- function(B, s2) {
+  y.ols = X %*% B + rnorm(nrow(X), 0, sqrt(s2))
+  return(y.ols)
+}
+y.ols <- sapply(1:nrow(beta), function(i) sample.ols(beta[i, ], s2[i]))
+# Sample from GLS
+sample.gls <- function(B, s2, phi) {
+  y.gls = X %*% B + as.numeric(rmvnorm(1, sigma = s2 * covmat(phi)))
+  return(y.gls)
+}
+y.gls <- sapply(1:nrow(BETA), function(i) sample.gls(BETA[i, ], SIGMA2[i], PHI[i]))
+```
+
+```{r, echo = FALSE}
+plot(y, main = "Comparison of OLS Posterior Predictions", 
+     xlab = "Years since 1976", ylab = "Gross Box Office Sales")
+for (i in sample(1:nrow(beta), 4)) points(y.ols[, i], type = "l", col = "blue")
+points(y, type = "l")
+plot(y, main = "Comparison of GLS Posterior Predictions", 
+     xlab = "Years since 1976", ylab = "Gross Box Office Sales") 
+for (i in sample(1:nrow(BETA), 4)) points(y.gls[, i], type = "l", col = "red")
+points(y, type = "l")
+```
+
+Both models is that the predicted data is that many of the values go below zero when it has not been long since 1976. This may be one problem with our models since these values are not possible in the context of sales.
+
+## Correlation between Ys
+
+Seeing the GLS model appears to capture the relationship between consequent years' gross box office sales from our predictive checking, let's compare how the correlation between the sales compare to that of the OLS model and the GLS model. Below is the joint distribution for the Lag 2 and Lag 3 for both the OLS and GLS. When plotting the observed value from the data, it is apparent that a GLS model fits this data better based off this statistic.
+
+```{r, echo = FALSE}
+get_acf <- function(Y) {
+  ac = acf(Y, plot = FALSE)$acf[c(2, 3)]
+  return(ac)
+}
+# OLS 
+y.ols.acf <- apply(y.ols, 2, get_acf)
+# GLS
+y.gls.acf <- apply(y.gls, 2, get_acf)
+```
+
+```{r, echo = FALSE}
+# Compare 
+# OLS
+plot(t(y.ols.acf[, -1]), main = "Comparison of ACF to OLS Posterior Predictions", 
+     xlab = "Lag 2", ylab = "Lag 3",
+     col = "blue")
+acf.y <- get_acf(y)
+points(acf.y[1], acf.y[2], pch = 16)
+# GLS
+plot(t(y.gls.acf[, -1]), main = "Comparison of ACF to GLS Posterior Predictions", 
+     xlab = "Lag 2", ylab = "Lag 3",
+     col = "red")
+points(acf.y[1], acf.y[2], pch = 16)
+```
+
+
+## Predictions for Next Years
+
+```{r, echo = FALSE}
+# Number of new samples
+N <- 15
+# Sample from the OLS
+sample.ols.new <- function(B, s2, n = N) {
+  y.ols = matrix(c(rep(1, nrow(X) + n), 0:(nrow(X) - 1 + n)), 
+                 ncol = 2) %*% B + 
+    rnorm(nrow(X) + n, 0, sqrt(s2))
+  return(y.ols)
+}
+y.ols <- sapply(1:nrow(beta), function(i) sample.ols.new(beta[i, ], s2[i]))
+# Sample from GLS
+
+sample.gls.new <- function(B, s2, phi, n = N) {
+  
+  # Create Covariance matrix
+  covmat.new = function(phi) {
+    x = 1:(nrow(X) + n)
+    phi ^ abs(outer(x, x, "-"))
+  }
+  y.gls = matrix(c(rep(1, nrow(X) + n), 0:(nrow(X) - 1 + n)), 
+                 ncol = 2) %*% B + 
+    as.numeric(rmvnorm(1, sigma = s2 * covmat.new(phi)))
+  return(y.gls)
+}
+y.gls <- sapply(1:nrow(BETA), function(i) sample.gls.new(BETA[i, ], SIGMA2[i], PHI[i]))
+
+## New
+y.ols.new <- y.ols[33:(33 + N - 1), ]
+y.gls.new <- y.gls[33:(33 + N - 1), ]
+```
+
+```{r, echo = FALSE}
+## Plot New Points
+x <- rep(1:N, ncol(y.ols.new) - 1)
+plot(jitter(x) - .25, as.numeric(y.ols.new[, -1]), col = "blue",
+     xlim = c(0.5, N + .5), ylim = c(400, 2000), 
+     xlab = "Years since Observed Data", ylab = "Gross Box Office", 
+     main = paste("Predictions Confidence Intervals for Next", N, "Years"))
+points(jitter(x) + .25, as.numeric(y.gls.new[, -1]), col = "red")
+legend("topleft", text.col = c("blue", "red"),
+       legend = c("OLS", "GLS"))
+```
+
+
+```{r}
+last.obs.ols <- y.ols[32, ]
+y.ols.sim <- y.ols[, last.obs.ols > mean(last.obs.ols) ]
+last.obs.gls <- y.gls[32, ]
+y.gls.sim <- y.gls[, last.obs.gls > mean(last.obs.gls)]
+```
+
+```{r}
+dist_ts <- function(y) {
+  # Number of replications
+  n = ncol(y)
+  # Number of observations to compare
+  n.row <- nrow(y)
+  # Matrix of repeated values from our data
+  df.mat = rep(df$GrossBoxOffice[(32 - n.row + 1):32], times = n) %>% 
+    matrix(ncol = n)
+  # Get L2 Distance between the last n.row data points and our predicted 
+  diff.mat = apply((y - df.mat)^2, 2, sum)
+  return(diff.mat)
+}
+diff.ols <- dist_ts(y.ols[30:32, ])
+diff.gls <- dist_ts(y.gls[30:32, ])
+diff.ols2 <- sapply(1:ncol(y.ols), function(i) dtw(y.ols[1:32, i], df$GrossBoxOffice)$distance)
+diff.gls2 <- sapply(1:ncol(y.ols), function(i) dtw(y.gls[1:32, i], df$GrossBoxOffice)$distance)
+```
+
+```{r}
+# Top Ten percent of closest time series to our data
+y.ols.close <- y.ols[, diff.ols < quantile(diff.ols, .10)]
+y.gls.close <- y.gls[, diff.gls < quantile(diff.gls, .10)]
+y.ols.close2 <- y.ols[, diff.ols2 < quantile(diff.ols2, .10)]
+y.gls.close2 <- y.ols[, diff.gls2 < quantile(diff.gls2, .10)]
+```
+
+```{r}
+plot(df$GrossBoxOffice, type = "l", xlab = "Years since 1976")
+for (i in 1:ncol(y.gls.close)) {points(y.gls.close[, i], col = "red")}
+for (i in 1:ncol(y.ols.close)) {points(y.ols.close[, i], col = "blue")}
+plot(df$GrossBoxOffice, type = "l", xlab = "Years since 1976")
+for (i in 1:ncol(y.gls.close2)) {points(y.gls.close2[, i], col = "red")}
+for (i in 1:ncol(y.ols.close2)) {points(y.ols.close2[, i], col = "blue")}
+```
+```{r}
+plot(y.ols.close[-c(1:32), 1], type = "l", ylim = c(600, 1600))
+for (i in 2:ncol(y.ols.close)) {points(y.ols.close[-c(1:32), i], type = "l", col = "blue")}
+for (i in 1:ncol(y.gls.close)) {points(y.gls.close[-c(1:32), i], type = "l", col = "red")}
+plot(y.ols.close2[-c(1:32), 1], type = "l", ylim = c(600, 1600))
+for (i in 2:ncol(y.ols.close2)) {points(y.ols.close2[-c(1:32), i], type = "l", col = "blue")}
+for (i in 1:ncol(y.gls.close2)) {points(y.gls.close2[-c(1:32), i], type = "l", col = "red")}
+```
+
+```{r}
+y.ols.close[-c(1:32), ] %>% apply(1, function(x) quantile(x, c(.025, .975))) %>% apply(2, function(x) max(x) - min(x))
+y.gls.close[-c(1:32), ] %>% apply(1, function(x) quantile(x, c(.025, .975))) %>% apply(2, function(x) max(x) - min(x))
+y.ols.close2[-c(1:32), ] %>% apply(1, function(x) quantile(x, c(.025, .975))) %>% apply(2, function(x) max(x) - min(x))
+y.gls.close2[-c(1:32), ] %>% apply(1, function(x) quantile(x, c(.025, .975))) %>% apply(2, function(x) max(x) - min(x))
+```
+
+
+
+
+# Conclusion
+
+Comparing these two model, it is apparent that the GLS model has many strengths over the OLS.  Although we see that both models can predict values where sales are below zero which is not possible, the GLS model is able to not only get a more precise estimate for the $\beta$ parameters, but is also able to come up with a model that represents the observed data well as we saw in the posterior predictions and have data that has similar corelation as the observed data. Choosing between these model these two models, the GLS looks to reflect the data better than the OLS.
+
+## What I learned
+
+With this project, it was the first time that I implemented a Gibbs sampler that also used the Metropolis-Hastings algorithm. This procedure seemed to work well for model since there is not a closed form for the parameter $\phi$. I would like to see where else I would be able to apply this combination of methods and look forward to using them again for some future model.
+
+# Appendix
+
+## Samplers for OLS and GLS
+
+Below is the code for implementing the samplers for the OLS and GLS:
+
+```{r, eval = FALSE}
+S <- 10000
+# Prior Information
+fit <- lm(y ~ X - 1); summ <- summary(fit)
+B0 <- c(0, 0)
+S0 <- nrow(X) * summ$sigma^2 *solve(t(X) %*% X); iS0 <- solve(S0)
+nu0 <- 1; s20 <- summ$sigma^2
+
+rBeta <- function(sigma2) {
+  Sn = solve(iS0 + t(X) %*% X / sigma2)
+  Bn = Sn %*% ( iS0 %*% B0 + t(X) %*% y / sigma2 )
+  return( rmvnorm(1, Bn, Sn))
+}
+rsigma2 <- function(Beta) {
+  yXB = y - X %*% Beta
+  SSR = t(yXB) %*%  yXB
+  return( 1 / rgamma(1, (nu0 + n) / 2, (nu0 * s20 + SSR) / 2))
+}
+
+# Prior
+n <- nrow(X); p <- ncol(X)
+beta <- c(0, 0); s2 <- c(s20)
+for (s in 1:S) {
+  # Sample Beta
+  beta <- rbind(beta, rBeta(s2[length(s2)]))
+  # Sample Sigma2
+  s2 <- c(s2, rsigma2(beta[nrow(beta), ]))
+}
+```
+
+```{r, eval = FALSE}
+# Create Covariance matrix
+covmat <- function(phi) {
+  x = 1:nrow(X)
+  phi ^ abs(outer(x, x, "-"))
+}
+# Sample Full Conditional B
+rBeta <- function(icovmat, sigma2) {
+  Sn = solve((t(X) %*% icovmat %*% X) / sigma2 + iS0)
+  Bn = Sn %*% ( (t(X) %*% icovmat %*% y) / sigma2 + iS0 %*% B0 )
+  return(rmvnorm(1, Bn, Sn))
+}
+# Sample Full Conditional Sigma2
+rsigma2 <- function(icovmat, Beta) {
+  yXB = y - (X %*% Beta)
+  SSRp = t(yXB) %*% icovmat %*% yXB
+  return( 1 / rgamma(1, (nu0 + n) / 2, (nu0 * s20 + SSRp) / 2))
+}
+# Metro Hastings phi
+rphi <- function(phi, Beta, sigma2) {
+  phi.star = runif(1, phi - delta, phi + delta)
+  phi.star = ifelse(phi.star < 0, abs(phi.star), 
+                    ifelse(phi.star > 1, 2 - phi.star, phi.star))
+  log.r = dmvnorm(y, X %*% Beta, sigma = sigma2 * covmat(phi.star), log = TRUE) - 
+    dmvnorm(y, X %*% Beta, sigma = sigma2 * covmat(phi), log = TRUE)
+  
+  if (log(runif(1)) < log.r) { 
+    return( phi.star )
+  } else {
+    return( phi )
+  }
+}
+
+# Metropolis Hastings
+S <- 10000
+# Prior Information
+iS0 <- solve(S0)
+delta <- .01
+BETA <- c(0, 0); SIGMA2 <- c(s20); PHI <- c(.923)
+for (s in 1:S) {
+  # Sample Beta
+  phi <- PHI[length(PHI)]
+  ico <- covmat(phi)
+  BETA <- rbind(BETA, rBeta(ico, SIGMA2[length(SIGMA2)]))
+  # Sample Sigma2
+  SIGMA2 <- c(SIGMA2, rsigma2(ico, BETA[nrow(BETA), ]))
+  # Update Phi
+  PHI <- c(PHI, rphi(phi, BETA[nrow(BETA), ], SIGMA2[length(SIGMA2)]))
+}
+```
+
+## Posterior Predictions
+
+```{r, eval = FALSE}
+# Sample from the OLS
+sample.ols <- function(B, s2) {
+  y.ols = X %*% B + rnorm(nrow(X), 0, sqrt(s2))
+  return(y.ols)
+}
+y.ols <- sapply(1:nrow(beta), function(i) sample.ols(beta[i, ], s2[i]))
+# Sample from GLS
+sample.gls <- function(B, s2, phi) {
+  y.gls = X %*% B + as.numeric(rmvnorm(1, sigma = s2 * covmat(phi)))
+  return(y.gls)
+}
+y.gls <- sapply(1:nrow(BETA), function(i) sample.gls(BETA[i, ], SIGMA2[i], PHI[i]))
+```
+
+## Correlation between Ys
+
+```{r, eval = FALSE}
+get_acf <- function(Y) {
+  ac = acf(Y, plot = FALSE)$acf[c(2, 3)]
+  return(ac)
+}
+# OLS 
+y.ols.acf <- apply(y.ols, 2, get_acf)
+# GLS
+y.gls.acf <- apply(y.gls, 2, get_acf)
+```
+
+## Extra: Variation 
+
+The variation for the GLS appears to be larger than that of the OLS as seen below.
+
+```{r, echo = FALSE}
+par(mfrow = c(1, 2))
+hist(s2, main = "OLS Variation", xlab = "Sigma Squared")
+hist(SIGMA2, main = "GLS Variation", xlab = "Sigma Squared")
+```
