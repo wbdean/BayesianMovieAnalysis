@@ -319,8 +319,8 @@ dist_ts <- function(y) {
 }
 diff.ols <- dist_ts(y.ols[30:32, ])
 diff.gls <- dist_ts(y.gls[30:32, ])
-diff.ols2 <- sapply(1:ncol(y.ols), function(i) dtw(y.ols[1:32, i], df$GrossBoxOffice)$distance)
-diff.gls2 <- sapply(1:ncol(y.ols), function(i) dtw(y.gls[1:32, i], df$GrossBoxOffice)$distance)
+diff.ols2 <- sapply(1:ncol(y.ols), function(i) dtw(y.ols[30:32, i], df$GrossBoxOffice[30:32])$distance)
+diff.gls2 <- sapply(1:ncol(y.gls), function(i) dtw(y.gls[30:32, i], df$GrossBoxOffice[30:32])$distance)
 ```
 
 ```{r}
@@ -328,7 +328,7 @@ diff.gls2 <- sapply(1:ncol(y.ols), function(i) dtw(y.gls[1:32, i], df$GrossBoxOf
 y.ols.close <- y.ols[, diff.ols < quantile(diff.ols, .10)]
 y.gls.close <- y.gls[, diff.gls < quantile(diff.gls, .10)]
 y.ols.close2 <- y.ols[, diff.ols2 < quantile(diff.ols2, .10)]
-y.gls.close2 <- y.ols[, diff.gls2 < quantile(diff.gls2, .10)]
+y.gls.close2 <- y.gls[, diff.gls2 < quantile(diff.gls2, .10)]
 ```
 
 ```{r}
